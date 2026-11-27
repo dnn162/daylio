@@ -199,6 +199,15 @@ textarea.inp { resize: vertical; line-height: 1.6; }
   .ent .txt { font-size: 14px; }
 }
 
+/* 手机首次打开：安装提示条 */
+.tipbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: linear-gradient(135deg, #FFFCF2, #FDF2D8);
+  border: 1px solid #EBCF9A; border-radius: 14px;
+  padding: 10px 12px; margin-bottom: 14px; font-size: 12.5px; color: var(--ink-2);
+}
+.tipbar b { color: var(--honey-deep); }
+
 </style>
 </head>
 <body>
@@ -793,6 +802,7 @@ textarea.inp { resize: vertical; line-height: 1.6; }
     s.ui = Object.assign({}, d.ui, s.ui || {});
     if (!s.ui.open) s.ui.open = {};
     if (!s.ui.date) s.ui.date = D.today();
+    if (s.ui.date < D.today()) s.ui.date = D.today();   // 打开时自动跟到今天
     return s;
   }
 
@@ -1109,12 +1119,30 @@ textarea.inp { resize: vertical; line-height: 1.6; }
   }
 
   /* ================= 视图 ================= */
+  function tipBanner() {
+    try { if (localStorage.getItem('daylio-tip-off')) return ''; } catch (e) { }
+    var standalone = false;
+    try {
+      standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone;
+    } catch (e) { }
+    if (standalone) return '';
+    var ua = navigator.userAgent || '';
+    var ios = /iPhone|iPad|iPod/.test(ua);
+    var android = /Android/.test(ua);
+    if (!ios && !android) return '';
+    var how = ios ? '点底部 <b>分享</b> 按钮 →「添加到主屏幕」'
+                  : '点右上角 <b>⋮</b> →「添加到主屏幕 / 安装应用」';
+    return '<div class="tipbar">装成 App：' + how +
+      '<button class="btn ghost sm" data-act="tip-off" style="margin-left:auto">知道了</button></div>';
+  }
+
   function render() {
     renderSidebar();
     var main = document.getElementById('main');
-    if (state.ui.tab === 'summary') main.innerHTML = renderSummary();
-    else if (state.ui.tab === 'data') main.innerHTML = renderData();
-    else main.innerHTML = renderDay();
+    var tip = tipBanner();
+    if (state.ui.tab === 'summary') main.innerHTML = tip + renderSummary();
+    else if (state.ui.tab === 'data') main.innerHTML = tip + renderData();
+    else main.innerHTML = tip + renderDay();
   }
 
   function renderDay() {
@@ -1361,6 +1389,7 @@ textarea.inp { resize: vertical; line-height: 1.6; }
     if (!el) return;
     var act = el.getAttribute('data-act'), v = el.getAttribute('data-v');
 
+    if (act === 'tip-off') { try { localStorage.setItem('daylio-tip-off', '1'); } catch (e) { } render(); return; }
     if (act === 'tab') { state.ui.tab = v; save(); render(); return; }
     if (act === 'sum') { state.ui.sum = v; save(); render(); return; }
     if (act === 'toggle') { state.ui.open[v] = !state.ui.open[v]; save(); render(); return; }
