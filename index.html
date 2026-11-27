@@ -553,6 +553,148 @@ textarea.inp { resize: vertical; line-height: 1.6; }
 
 </script>
 <script>
+/* sync.js —— 手机 ↔ 电脑 同步（ntfy 中转 + 本地 AES 加密）
+   · 不需要电脑开机、不需要账号、不依赖同一 Wi-Fi
+   · 内容加密后才发出去，topic 里只有密文
+*/
+(function (root) {
+  'use strict';
+
+  var NTFY = 'https://ntfy.sh';
+  var CODE_KEY = 'daylio-sync-code';
+  var TS_KEY = 'daylio-sync-ts';
+
+  var hasCrypto = (typeof crypto !== 'undefined' && crypto.subtle && typeof TextEncoder !== 'undefined');
+
+  function b64(buf) {
+    var b = new Uint8Array(buf), s = '';
+    for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+    return btoa(s);
+  }
+  function unb64(str) {
+    var s = atob(str), o = new Uint8Array(s.length);
+    for (var i = 0; i < s.length; i++) o[i] = s.charCodeAt(i);
+    return o;
+  }
+
+  function codeGet() {
+    try { return localStorage.getItem(CODE_KEY) || ''; } catch (e) { return ''; }
+  }
+  function codeSet(c) {
+    try { localStorage.setItem(CODE_KEY, c || ''); } catch (e) { }
+  }
+  function newCode() {
+    var abc = 'abcdefghjkmnpqrstuvwxyz23456789', out = '';
+    var r = new Uint8Array(8);
+    if (crypto.getRandomValues) crypto.getRandomValues(r);
+    else for (var i = 0; i < 8; i++) r[i] = Math.floor(Math.random() * 255);
+    for (var j = 0; j < 8; j++) out += abc[r[j] % abc.length];
+    return out;
+  }
+
+  /** topic 由同步码派生（不可逆），内容仍加密 */
+  function topicOf(code) {
+    if (!hasCrypto) return 'nana-dl-' + code;
+    var enc = new TextEncoder();
+    return crypto.subtle.digest('SHA-256', enc.encode('daylio-' + code)).then(function (h) {
+      return 'nana-dl-' + b64(h).replace(/[^A-Za-z0-9]/g, '').slice(0, 16).toLowerCase();
+    });
+  }
+
+  function keyOf(code) {
+    var enc = new TextEncoder();
+    return crypto.subtle.importKey('raw', enc.encode(code), 'PBKDF2', false, ['deriveKey'])
+      .then(function (base) {
+        return crypto.subtle.deriveKey(
+          { name: 'PBKDF2', salt: enc.encode('daylio-sync'), iterations: 60000, hash: 'SHA-256' },
+          base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+      });
+  }
+
+  function seal(obj, code) {
+    var text = JSON.stringify(obj);
+    if (!hasCrypto) return Promise.resolve('P' + btoa(unescape(encodeURIComponent(text))));
+    return keyOf(code).then(function (k) {
+      var enc = new TextEncoder();
+      var iv = crypto.getRandomValues(new Uint8Array(12));
+      return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, k, enc.encode(text)).then(function (ct) {
+        return 'E' + b64(iv) + '.' + b64(ct);
+      });
+    });
+  }
+
+  function unseal(str, code) {
+    if (!str) return Promise.resolve(null);
+    if (str[0] === 'P') {
+      try { return Promise.resolve(JSON.parse(decodeURIComponent(escape(atob(str.slice(1)))))); } catch (e) { return Promise.resolve(null); }
+    }
+    if (str[0] !== 'E') return Promise.resolve(null);
+    if (!hasCrypto) return Promise.resolve(null);
+    var parts = str.slice(1).split('.');
+    return keyOf(code).then(function (k) {
+      return crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(parts[0]) }, k, unb64(parts[1]))
+        .then(function (buf) {
+          try { return JSON.parse(new TextDecoder().decode(buf)); } catch (e) { return null; }
+        }).catch(function () { return null; });
+    });
+  }
+
+  /** 发布一天的内容 */
+  function publishDay(code, dayKey, day, kind) {
+    return topicOf(code).then(function (topic) {
+      return seal({ d: dayKey, day: day, kind: kind || 'day', t: Date.now() }, code).then(function (payload) {
+        return fetch(NTFY + '/' + topic, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain', 'Title': 'daylio', 'Priority': 'low' },
+          body: payload
+        }).then(function (r) { return r.ok; });
+      });
+    });
+  }
+
+  /** 拉取比 since 新的消息 */
+  function pull(code, since) {
+    return topicOf(code).then(function (topic) {
+      var url = NTFY + '/' + topic + '/json?poll=1&since=' + Math.floor((since || 0) / 1000);
+      return fetch(url, { cache: 'no-store' }).then(function (r) { return r.text(); }).then(function (txt) {
+        var lines = txt.split('\n').filter(Boolean);
+        var out = [];
+        var chain = Promise.resolve();
+        lines.forEach(function (line) {
+          chain = chain.then(function () {
+            var msg;
+            try { msg = JSON.parse(line); } catch (e) { return; }
+            if (!msg || msg.event !== 'message' || !msg.message) return;
+            return unseal(msg.message, code).then(function (obj) {
+              if (obj && obj.d && obj.day) {
+                out.push(obj);
+                var ts = (msg.time || 0) * 1000;
+                if (ts > (since || 0)) since = ts;
+              }
+            });
+          });
+        });
+        return chain.then(function () { return { msgs: out, lastTs: since }; });
+      });
+    });
+  }
+
+  function lastTs() {
+    try { return parseInt(localStorage.getItem(TS_KEY) || '0', 10) || 0; } catch (e) { return 0; }
+  }
+  function setLastTs(t) {
+    try { localStorage.setItem(TS_KEY, String(t || 0)); } catch (e) { }
+  }
+
+  root.SYNC = {
+    codeGet: codeGet, codeSet: codeSet, newCode: newCode,
+    publishDay: publishDay, pull: pull, lastTs: lastTs, setLastTs: setLastTs,
+    hasCrypto: hasCrypto
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+<script>
 /* app.js —— Daylio：每天记录（学习 / 其他）+ 周月自动归类汇总 */
 (function () {
   'use strict';
@@ -567,6 +709,8 @@ textarea.inp { resize: vertical; line-height: 1.6; }
   var pendingRev = '';
   var tunnel = null;        // { running, starting, url, error }
   var room = null;          // 云同步房间 { id, pass }
+  var syncCode = '';        // ntfy 同步码
+  var syncBusy = false, syncStatus = '';
   var cloudBusy = false, cloudErr = '', cloudTimer = null, cloudRev = '';
 
   /* ================= 数据 ================= */
@@ -616,6 +760,55 @@ textarea.inp { resize: vertical; line-height: 1.6; }
     if (!room) return '';
     var base = (SERVER !== null) ? 'https://nana-daylio.surge.sh/' : (location.origin + location.pathname);
     return CLOUD.linkFor(room, base);
+  }
+
+  function syncPublish(date) {
+    if (!syncCode || !window.SYNC) return;
+    var day = state.days[date] || { study: [], other: [] };
+    SYNC.publishDay(syncCode, date, day).then(function (ok) {
+      syncStatus = ok ? '已同步 ' + hhmm() : '同步失败';
+      if (state.ui.tab === 'data' && !document.hidden) render();
+    }).catch(function () { syncStatus = '同步失败'; });
+  }
+
+  function syncPull(silent) {
+    if (!syncCode || !window.SYNC || syncBusy) return;
+    syncBusy = true;
+    SYNC.pull(syncCode, SYNC.lastTs()).then(function (res) {
+      syncBusy = false;
+      if (!res || !res.msgs.length) { SYNC.setLastTs(res ? res.lastTs : SYNC.lastTs()); return; }
+      var changed = false;
+      res.msgs.forEach(function (m) {
+        var local = state.days[m.d] || { study: [], other: [] };
+        var merged = { study: (m.day.study || []).slice(), other: (m.day.other || []).slice() };
+        ['study', 'other'].forEach(function (k) {
+          var ids = {};
+          merged[k].forEach(function (x) { ids[x.id] = 1; });
+          (local[k] || []).forEach(function (x) { if (!ids[x.id]) merged[k].push(x); });
+        });
+        var before = JSON.stringify(local);
+        if (JSON.stringify(merged) !== before) { state.days[m.d] = merged; changed = true; }
+      });
+      SYNC.setLastTs(res.lastTs);
+      if (changed) {
+        saveLocalOnly();
+        syncStatus = '收到 ' + res.msgs.length + ' 条更新';
+        if (!silent) render();
+      }
+    }).catch(function () { syncBusy = false; });
+  }
+
+  function hhmm() {
+    var d = new Date();
+    return D.pad(d.getHours()) + ':' + D.pad(d.getMinutes());
+  }
+
+  function syncPublishAllRecent() {
+    if (!syncCode || !window.SYNC) return;
+    var keys = Object.keys(state.days).sort().slice(-14);
+    keys.forEach(function (k, i) {
+      setTimeout(function () { syncPublish(k); }, i * 350);
+    });
   }
 
   function cloudPush(force) {
@@ -767,14 +960,15 @@ textarea.inp { resize: vertical; line-height: 1.6; }
     if (SERVER !== null) serverSave(json);
   }
 
-  function save() {
+  function save(publishDate) {
     state.meta.updatedAt = new Date().toISOString();
     pendingRev = state.meta.updatedAt;
     var json = JSON.stringify(state);
     try { localStorage.setItem(STORE_KEY, json); } catch (e) { }
     if (SERVER !== null) serverSave(json);
     if (room && window.CLOUD) cloudPush();
-    flag(SERVER !== null ? '已写入文件' : (room ? '已同步' : '已保存'));
+    if (publishDate && syncCode) syncPublish(publishDate);
+    flag(syncCode ? '已保存 · 已同步' : (SERVER !== null ? '已写入文件' : '已保存'));
   }
 
   var flagTimer = null;
@@ -1017,6 +1211,22 @@ textarea.inp { resize: vertical; line-height: 1.6; }
       info = '<div class="hint">数据存在浏览器里，每次修改立即保存。想直接存成文件，请用桌面图标启动。</div>';
     }
     var lan = (serverInfo && serverInfo.lan) || [];
+    // 同步卡（ntfy：手机电脑不见面也能同步）
+    var syncCard = '<div class="card"><div class="card-title">手机 ↔ 电脑同步<span class="tag">不用电脑开机也行</span></div>' +
+      '<div class="card-desc">给手机和电脑配同一个同步码，两边改完各自立刻保存，联网就自动对齐。</div>' +
+      (syncCode
+        ? ('<div class="ent" style="padding:10px 2px"><span class="txt" style="font-size:16px;font-weight:700;letter-spacing:.12em">' +
+           esc(syncCode) + '</span><button class="btn ghost sm" data-act="sync" data-v="copy">复制</button></div>' +
+           '<div class="btn-group" style="margin-top:8px">' +
+           '<button class="btn ghost sm" data-act="sync" data-v="now">立即同步</button>' +
+           '<button class="btn ghost sm" data-act="sync" data-v="push">重发本机全部</button>' +
+           '<button class="btn danger sm" data-act="sync" data-v="off">断开同步</button></div>' +
+           '<div class="hint" style="margin-top:8px">' + (syncStatus || '已开启，每 9 秒自动检查一次') + '</div>')
+        : ('<div class="btn-group"><button class="btn" data-act="sync" data-v="new">生成同步码</button></div>' +
+           '<div class="ent" style="margin-top:10px;padding:0"><input class="inp" id="sync-in" placeholder="或粘贴另一台设备的同步码"><button class="btn ghost sm" data-act="sync" data-v="join">使用</button></div>' +
+           '<div class="hint" style="margin-top:8px">两台设备用同一个码就配对好了；数据加密后才发出，密码就是这串码。</div>')) +
+      '</div>';
+
     // 公网卡（bore 隧道：任何网络都能访问）
     var hasBore = !!(serverInfo && serverInfo.hasBore);
     var ti = (serverInfo && serverInfo.tunnel) || tunnel || {};
@@ -1058,7 +1268,7 @@ textarea.inp { resize: vertical; line-height: 1.6; }
 
     return '<div class="page-head"><div><div class="page-title">数据</div>' +
       '<div class="page-sub">云同步、手机访问、导出、导入、清空</div></div></div>' +
-      cloudCard + phoneCard +
+      syncCard + cloudCard + phoneCard +
       '<div class="card"><div class="card-title">存储</div>' + info + '</div>' +
       '<div class="card"><div class="card-title">备份与恢复</div>' +
       '<div class="card-desc">导出一个 .json，换电脑时可以带过去。</div>' +
@@ -1086,7 +1296,36 @@ textarea.inp { resize: vertical; line-height: 1.6; }
       var target = real[i];
       if (!target) return;
       dayOf(state.ui.date)[kind] = list.filter(function (x) { return x !== target; });
-      save(); render(); return;
+      save(state.ui.date); render(); return;
+    }
+    if (act === 'sync') {
+      if (v === 'new') {
+        syncCode = SYNC.newCode();
+        SYNC.codeSet(syncCode);
+        flag('同步码已生成');
+        render();
+        syncPublishAllRecent();
+      } else if (v === 'join') {
+        var el = document.getElementById('sync-in');
+        var c = (el && el.value || '').trim().toLowerCase();
+        if (!c) { flag('先填同步码'); return; }
+        if (!/^[a-z0-9]{4,20}$/.test(c)) { flag('同步码格式不对'); return; }
+        syncCode = c; SYNC.codeSet(c); SYNC.setLastTs(0);
+        flag('已配对');
+        render();
+        syncPull(true);
+        syncPublishAllRecent();
+      } else if (v === 'off') {
+        if (!confirm('断开同步？两台设备以后不再自动对齐。')) return;
+        syncCode = ''; SYNC.codeSet(''); SYNC.setLastTs(0); render();
+      } else if (v === 'now') {
+        syncPull(false); flag('正在同步…'); setTimeout(render, 1200);
+      } else if (v === 'push') {
+        syncPublishAllRecent(); flag('正在重发…');
+      } else if (v === 'copy') {
+        try { navigator.clipboard.writeText(syncCode); flag('已复制同步码'); } catch (e) { }
+      }
+      return;
     }
     if (act === 'cloud') {
       if (v === 'on') {
@@ -1164,7 +1403,7 @@ textarea.inp { resize: vertical; line-height: 1.6; }
     var day = dayOf(state.ui.date || D.today());
     if (!Array.isArray(day[kind])) day[kind] = [];
     day[kind].push({ id: uid(), text: text });
-    save(); render();
+    save(state.ui.date); render();
     var again = document.getElementById('in-' + kind);
     if (again) again.focus();
   }
@@ -1179,10 +1418,17 @@ textarea.inp { resize: vertical; line-height: 1.6; }
   }
 
   /* ================= 启动 ================= */
+  syncCode = (window.SYNC && SYNC.codeGet()) || '';
   room = (window.CLOUD && CLOUD.roomFromHash()) || (window.CLOUD && CLOUD.loadRoom()) || null;
   if (room && window.CLOUD) CLOUD.saveRoom(room);
   state = load();
   if (room && window.CLOUD) cloudPull(false);
+  if (syncCode && window.SYNC) {
+    syncPull(true);
+    setInterval(function () { if (!document.hidden) syncPull(true); }, 9000);
+    window.addEventListener('focus', function () { syncPull(true); });
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) syncPull(true); });
+  }
   if (SERVER !== null) {
     try { var r0 = serverGet('/api/rev'); if (r0) lastSeenRev = (JSON.parse(r0).updatedAt || ''); } catch (e) { }
   }
