@@ -763,6 +763,10 @@ textarea.inp { resize: vertical; line-height: 1.6; }
     return CLOUD.linkFor(room, base);
   }
 
+  function syncDebug(msg) {
+    try { if (/[?&]debug=1/.test(location.search)) document.title = 'DIAG ' + msg; } catch (e) { }
+  }
+
   function syncPublish(date) {
     if (!syncCode || !window.SYNC) return;
     var day = state.days[date] || { study: [], other: [] };
@@ -775,8 +779,10 @@ textarea.inp { resize: vertical; line-height: 1.6; }
   function syncPull(silent) {
     if (!syncCode || !window.SYNC || syncBusy) return;
     syncBusy = true;
+    syncDebug('pull start code=' + syncCode);
     SYNC.pull(syncCode, SYNC.lastTs()).then(function (res) {
       syncBusy = false;
+      syncDebug('got ' + (res ? res.msgs.length : -1) + ' msgs');
       if (!res || !res.msgs.length) { SYNC.setLastTs(res ? res.lastTs : SYNC.lastTs()); return; }
       var changed = false;
       res.msgs.forEach(function (m) {
@@ -796,7 +802,7 @@ textarea.inp { resize: vertical; line-height: 1.6; }
         syncStatus = '收到 ' + res.msgs.length + ' 条更新';
         if (!silent) render();
       }
-    }).catch(function () { syncBusy = false; });
+    }).catch(function (e) { syncBusy = false; syncDebug('pull err ' + (e && e.message)); });
   }
 
   function hhmm() {
