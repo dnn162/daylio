@@ -655,7 +655,8 @@ textarea.inp { resize: vertical; line-height: 1.6; }
   /** 拉取比 since 新的消息 */
   function pull(code, since) {
     return topicOf(code).then(function (topic) {
-      var url = NTFY + '/' + topic + '/json?poll=1&since=' + Math.floor((since || 0) / 1000);
+      var sinceQ = (since && since > 0) ? ('since=' + Math.floor(since / 1000)) : 'since=all';
+      var url = NTFY + '/' + topic + '/json?poll=1&' + sinceQ;
       return fetch(url, { cache: 'no-store' }).then(function (r) { return r.text(); }).then(function (txt) {
         var lines = txt.split('\n').filter(Boolean);
         var out = [];
