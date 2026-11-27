@@ -563,6 +563,7 @@ textarea.inp { resize: vertical; line-height: 1.6; }
   var NTFY = 'https://ntfy.sh';
   var CODE_KEY = 'daylio-sync-code';
   var TS_KEY = 'daylio-sync-ts';
+  var OUT_KEY = 'daylio-outbox';
 
   var hasCrypto = (typeof crypto !== 'undefined' && crypto.subtle && typeof TextEncoder !== 'undefined');
 
@@ -639,8 +640,45 @@ textarea.inp { resize: vertical; line-height: 1.6; }
     });
   }
 
-  /** 发布一天的内容 */
-  function publishDay(code, dayKey, day, kind) {
+  /* ---------- 待发队列：断网/超时都不丢 ---------- */
+  function outboxGet() {
+    try { return JSON.parse(localStorage.getItem(OUT_KEY) || '[]'); } catch (e) { return []; }
+  }
+  function outboxSet(list) {
+    try { localStorage.setItem(OUT_KEY, JSON.stringify(list.slice(-200))); } catch (e) { }
+  }
+  function outboxCount() { return outboxGet().length; }
+
+  function enqueue(dayKey, day) {
+    var list = outboxGet();
+    var found = false;
+    list.forEach(function (x) {
+      if (x.d === dayKey) { x.day = day; x.t = Date.now(); found = true; }
+    });
+    if (!found) list.push({ d: dayKey, day: day, t: Date.now() });
+    outboxSet(list);
+  }
+
+  function flushOutbox(code) {
+    var list = outboxGet();
+    if (!list.length) return Promise.resolve(0);
+    var done = 0;
+    var chain = Promise.resolve();
+    list.forEach(function (item) {
+      chain = chain.then(function () {
+        return publishRaw(code, item.d, item.day).then(function (ok) {
+          if (ok) {
+            done++;
+            var cur = outboxGet().filter(function (y) { return y.d !== item.d; });
+            outboxSet(cur);
+          }
+        }).catch(function () { });
+      });
+    });
+    return chain.then(function () { return done; });
+  }
+
+  function publishRaw(code, dayKey, day, kind) {
     return topicOf(code).then(function (topic) {
       return seal({ d: dayKey, day: day, kind: kind || 'day', t: Date.now() }, code).then(function (payload) {
         return fetch(NTFY + '/' + topic, {
@@ -649,6 +687,18 @@ textarea.inp { resize: vertical; line-height: 1.6; }
           body: payload
         }).then(function (r) { return r.ok; });
       });
+    }).catch(function () { return false; });
+  }
+
+  /** 对外：先入队，再尝试立刻发；失败留在队列里等重试 */
+  function publishDay(code, dayKey, day) {
+    enqueue(dayKey, day);
+    return publishRaw(code, dayKey, day).then(function (ok) {
+      if (ok) {
+        var cur = outboxGet().filter(function (y) { return y.d !== dayKey; });
+        outboxSet(cur);
+      }
+      return ok;
     });
   }
 
@@ -689,7 +739,8 @@ textarea.inp { resize: vertical; line-height: 1.6; }
 
   root.SYNC = {
     codeGet: codeGet, codeSet: codeSet, newCode: newCode,
-    publishDay: publishDay, pull: pull, lastTs: lastTs, setLastTs: setLastTs,
+    publishDay: publishDay, flushOutbox: flushOutbox, outboxCount: outboxCount,
+    pull: pull, lastTs: lastTs, setLastTs: setLastTs,
     hasCrypto: hasCrypto
   };
 })(typeof window !== 'undefined' ? window : globalThis);
@@ -711,7 +762,7 @@ textarea.inp { resize: vertical; line-height: 1.6; }
   var tunnel = null;        // { running, starting, url, error }
   var room = null;          // 云同步房间 { id, pass }
   var syncCode = '';        // ntfy 同步码
-  var syncBusy = false, syncStatus = '';
+  var syncBusy = false, syncStatus = '', syncLastOk = 0, syncFail = 0;
   var cloudBusy = false, cloudErr = '', cloudTimer = null, cloudRev = '';
 
   /* ================= 数据 ================= */
@@ -771,9 +822,10 @@ textarea.inp { resize: vertical; line-height: 1.6; }
     if (!syncCode || !window.SYNC) return;
     var day = state.days[date] || { study: [], other: [] };
     SYNC.publishDay(syncCode, date, day).then(function (ok) {
-      syncStatus = ok ? '已同步 ' + hhmm() : '同步失败';
+      if (ok) { syncStatus = '已同步 ' + hhmm(); syncLastOk = Date.now(); syncFail = 0; }
+      else { syncFail++; syncStatus = '暂时发不出去，稍后自动重试（待发 ' + SYNC.outboxCount() + ' 条）'; scheduleRetry(); }
       if (state.ui.tab === 'data' && !document.hidden) render();
-    }).catch(function () { syncStatus = '同步失败'; });
+    }).catch(function () { syncFail++; scheduleRetry(); });
   }
 
   function syncPull(silent) {
@@ -797,12 +849,28 @@ textarea.inp { resize: vertical; line-height: 1.6; }
         if (JSON.stringify(merged) !== before) { state.days[m.d] = merged; changed = true; }
       });
       SYNC.setLastTs(res.lastTs);
+      syncLastOk = Date.now(); syncFail = 0;
       if (changed) {
         saveLocalOnly();
         syncStatus = '收到 ' + res.msgs.length + ' 条更新';
         if (!silent) render();
       }
     }).catch(function (e) { syncBusy = false; syncDebug('pull err ' + (e && e.message)); });
+  }
+
+  var retryTimer = null;
+  function scheduleRetry() {
+    if (retryTimer || !syncCode) return;
+    var delay = Math.min(30000, 3000 * Math.pow(1.6, Math.min(syncFail, 5)));
+    retryTimer = setTimeout(function () {
+      retryTimer = null;
+      if (!syncCode || !window.SYNC) return;
+      SYNC.flushOutbox(syncCode).then(function (n) {
+        if (n > 0) { syncLastOk = Date.now(); syncFail = 0; syncStatus = '补发成功 ' + hhmm(); }
+        if (SYNC.outboxCount() > 0) scheduleRetry();
+        else if (state.ui.tab === 'data') render();
+      });
+    }, delay);
   }
 
   function hhmm() {
@@ -1228,7 +1296,10 @@ textarea.inp { resize: vertical; line-height: 1.6; }
            '<button class="btn ghost sm" data-act="sync" data-v="now">立即同步</button>' +
            '<button class="btn ghost sm" data-act="sync" data-v="push">重发本机全部</button>' +
            '<button class="btn danger sm" data-act="sync" data-v="off">断开同步</button></div>' +
-           '<div class="hint" style="margin-top:8px">' + (syncStatus || '已开启，每 9 秒自动检查一次') + '</div>')
+           '<div class="hint" style="margin-top:8px">' +
+           (syncStatus || ('已开启' + (syncLastOk ? ' · 上次成功 ' + new Date(syncLastOk).toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5) : '') + ' · 每 9 秒自动检查')) +
+           (SYNC.outboxCount && SYNC.outboxCount() ? '<br>待发 ' + SYNC.outboxCount() + ' 条（连上会自动补发）' : '') +
+           '</div>')
         : ('<div class="btn-group"><button class="btn" data-act="sync" data-v="new">生成同步码</button></div>' +
            '<div class="ent" style="margin-top:10px;padding:0"><input class="inp" id="sync-in" placeholder="或粘贴另一台设备的同步码"><button class="btn ghost sm" data-act="sync" data-v="join">使用</button></div>' +
            '<div class="hint" style="margin-top:8px">两台设备用同一个码就配对好了；数据加密后才发出，密码就是这串码。</div>')) +
@@ -1438,6 +1509,8 @@ textarea.inp { resize: vertical; line-height: 1.6; }
   state = load();
   if (room && window.CLOUD) cloudPull(false);
   if (syncCode && window.SYNC) {
+    SYNC.flushOutbox(syncCode);
+    if (SYNC.outboxCount() > 0) scheduleRetry();
     syncPull(false);
     setInterval(function () { if (!document.hidden) syncPull(true); }, 9000);
     window.addEventListener('focus', function () { syncPull(true); });
