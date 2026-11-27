@@ -1431,7 +1431,7 @@ textarea.inp { resize: vertical; line-height: 1.6; }
   state = load();
   if (room && window.CLOUD) cloudPull(false);
   if (syncCode && window.SYNC) {
-    syncPull(true);
+    syncPull(false);
     setInterval(function () { if (!document.hidden) syncPull(true); }, 9000);
     window.addEventListener('focus', function () { syncPull(true); });
     document.addEventListener('visibilitychange', function () { if (!document.hidden) syncPull(true); });
