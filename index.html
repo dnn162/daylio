@@ -1418,7 +1418,14 @@ textarea.inp { resize: vertical; line-height: 1.6; }
   }
 
   /* ================= 启动 ================= */
-  syncCode = (window.SYNC && SYNC.codeGet()) || '';
+  // 支持用 ?code=xxxx 一次性配对（手机上直接点链接即可）
+  var urlCode = '';
+  try {
+    var mm = (location.search + location.hash).match(/[?&#]code=([a-z0-9]{4,20})/i);
+    if (mm) urlCode = mm[1].toLowerCase();
+  } catch (e) { }
+  syncCode = urlCode || (window.SYNC && SYNC.codeGet()) || '';
+  if (urlCode && window.SYNC) { SYNC.codeSet(urlCode); SYNC.setLastTs(0); }
   room = (window.CLOUD && CLOUD.roomFromHash()) || (window.CLOUD && CLOUD.loadRoom()) || null;
   if (room && window.CLOUD) CLOUD.saveRoom(room);
   state = load();
