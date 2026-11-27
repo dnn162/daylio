@@ -1,0 +1,32 @@
+{
+ "name": "Daylio · 每日记录",
+ "short_name": "Daylio",
+ "description": "每天记学习和其他，自动归类汇总",
+ "start_url": "./",
+ "scope": "./",
+ "display": "standalone",
+ "orientation": "portrait",
+ "background_color": "#FDFAF1",
+ "theme_color": "#E2A93B",
+ "lang": "zh-CN",
+ "icons": [
+  {
+   "src": "icon-192.png",
+   "sizes": "192x192",
+   "type": "image/png",
+   "purpose": "any"
+  },
+  {
+   "src": "icon-512.png",
+   "sizes": "512x512",
+   "type": "image/png",
+   "purpose": "any"
+  },
+  {
+   "src": "icon-512.png",
+   "sizes": "512x512",
+   "type": "image/png",
+   "purpose": "maskable"
+  }
+ ]
+}
