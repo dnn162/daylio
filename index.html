@@ -828,7 +828,8 @@ textarea.inp { resize: vertical; line-height: 1.6; }
     try { if (/[?&]debug=1/.test(location.search)) document.title = 'DIAG ' + msg; } catch (e) { }
   }
 
-  function syncPublish(date) {
+    function syncPublish(date) {
+    if (SERVER !== null) return;          // 电脑端只读不写
     if (!syncCode || !window.SYNC) return;
     var day = state.days[date] || { study: [], other: [] };
     SYNC.publishDay(syncCode, date, day).then(function (ok) {
@@ -886,6 +887,21 @@ textarea.inp { resize: vertical; line-height: 1.6; }
   function hhmm() {
     var d = new Date();
     return D.pad(d.getHours()) + ':' + D.pad(d.getMinutes());
+  }
+
+  var _lastBroadcastD = 0;
+  function broadcastAll() {
+    if (SERVER !== null) return;          // 电脑端不发
+    if (!syncCode || !window.SYNC) return;
+    var now = Date.now();
+    if (now - _lastBroadcastD < 10 * 60 * 1000) return;
+    _lastBroadcastD = now;
+    var keys = Object.keys(state.days || {}).filter(function (k) {
+      var v = state.days[k];
+      return ((v.study || []).length + (v.other || []).length) > 0;
+    }).sort();
+    if (keys.length > 40) keys = keys.slice(-40);
+    keys.forEach(function (k, i) { setTimeout(function () { syncPublish(k); }, i * 400); });
   }
 
   function syncPublishAllRecent() {
