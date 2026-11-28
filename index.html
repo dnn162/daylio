@@ -1558,6 +1558,9 @@ textarea.inp { resize: vertical; line-height: 1.6; }
   state = load();
   if (room && window.CLOUD) cloudPull(false);
   if (syncCode && window.SYNC) {
+    setTimeout(function () { broadcastAll(); }, 2500);                       // 打开就把全部记录重发一遍
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) broadcastAll(); });
+    setInterval(function () { if (!document.hidden) broadcastAll(); }, 1800000);   // 每 30 分钟再发
     SYNC.flushOutbox(syncCode);
     if (SYNC.outboxCount() > 0) scheduleRetry();
     syncPull(false);
