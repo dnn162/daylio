@@ -570,9 +570,10 @@ textarea.inp { resize: vertical; line-height: 1.6; }
   'use strict';
 
   var NTFY = 'https://ntfy.sh';
-  var CODE_KEY = 'daylio-sync-code';
-  var TS_KEY = 'daylio-sync-ts';
-  var OUT_KEY = 'daylio-outbox';
+  var NS = 'daylio';
+  var CODE_KEY = NS + '-sync-code';
+  var TS_KEY = NS + '-sync-ts';
+  var OUT_KEY = NS + '-outbox';
 
   var hasCrypto = (typeof crypto !== 'undefined' && crypto.subtle && typeof TextEncoder !== 'undefined');
 
@@ -689,7 +690,7 @@ textarea.inp { resize: vertical; line-height: 1.6; }
 
   function publishRaw(code, dayKey, day, kind) {
     return topicOf(code).then(function (topic) {
-      return seal({ d: dayKey, day: day, kind: kind || 'day', t: Date.now() }, code).then(function (payload) {
+      return seal({ d: dayKey, day: day, k: NS, t: Date.now() }, code).then(function (payload) {
         return fetch(NTFY + '/' + topic, {
           method: 'POST',
           headers: { 'Content-Type': 'text/plain', 'Title': 'daylio', 'Priority': 'low' },
@@ -849,6 +850,8 @@ textarea.inp { resize: vertical; line-height: 1.6; }
       if (!res || !res.msgs.length) { SYNC.setLastTs(res ? res.lastTs : SYNC.lastTs()); return; }
       var changed = false;
       res.msgs.forEach(function (m) {
+        if (m.k && m.k !== 'diary') return;                 // 不是 Daylio 的消息，跳过
+        if (!m.day || (!m.day.study && !m.day.other)) return;
         var local = state.days[m.d] || { study: [], other: [] };
         var merged = { study: (m.day.study || []).slice(), other: (m.day.other || []).slice() };
         ['study', 'other'].forEach(function (k) {
@@ -1547,7 +1550,7 @@ textarea.inp { resize: vertical; line-height: 1.6; }
     var mm = (location.search + location.hash).match(/[?&#]code=([a-z0-9]{4,20})/i);
     if (mm) urlCode = mm[1].toLowerCase();
   } catch (e) { }
-  syncCode = urlCode || (window.SYNC && SYNC.codeGet()) || '';
+  syncCode = urlCode || (window.SYNC && SYNC.codeGet()) || 'dnk7m3xq';   // 默认码，避免两边串码
   if (urlCode && window.SYNC) { SYNC.codeSet(urlCode); SYNC.setLastTs(0); }
   room = (window.CLOUD && CLOUD.roomFromHash()) || (window.CLOUD && CLOUD.loadRoom()) || null;
   if (room && window.CLOUD) CLOUD.saveRoom(room);
